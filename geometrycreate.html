@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Dash Creator - Fixed Gravity</title>
+    <style>
+        :root {
+            --bg-color: #050505;
+            --grid-color: #1a1a1a;
+            --neon-blue: #00f3ff;
+            --neon-red: #ff0055;
+            --neon-green: #00ff66;
+            --neon-yellow: #ffee00;
+            --neon-purple: #bc13fe;
+            --ui-bg: #111;
+            --ui-border: #333;
+        }
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: var(--bg-color);
+            font-family: sans-serif;
+            color: white;
+            user-select: none;
+        }
+
+        canvas {
+            display: block;
+            background-color: var(--bg-color);
+        }
+
+        #top-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 50px;
+            background: rgba(0, 0, 0, 0.85);
+            border-bottom: 1px solid var(--neon-blue);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            box-sizing: border-box;
+            backdrop-filter: blur(5px);
+            z-index: 10;
+        }
+
+        #editor-ui {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 110px;
+            background: var(--ui-bg);
+            border-top: 2px solid var(--neon-blue);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            box-shadow: 0 -5px 20px rgba(0, 243, 255, 0.2);
+            transition: transform 0.3s;
+            z-index: 10;
+            padding: 0 10px;
+            overflow-x: auto;
+        }
+
+        #editor-ui.hidden {
+            transform: translateY(100%);
+        }
+
+        .btn {
+            background: #222;
+            color: white;
+            border: 1px solid var(--ui-border);
+            padding: 8px 16px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+            text-transform: uppercase;
+            font-size: 11px;
+            transition: all 0.2s;
+        }
+
+        .btn:hover {
+            background: #333;
+            border-color: var(--neon-blue);
+            box-shadow: 0 0 10px var(--neon-blue);
+        }
+
+        .btn.primary { background: var(--neon-blue); color: black; border: none; }
+        .btn.danger { background: var(--neon-red); color: white; border: none; }
+
+        .tool-item {
+            min-width: 65px;
+            height: 75px;
+            background: #222;
+            border: 2px solid transparent;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: 0.2s;
+        }
+
+        .tool-item.active {
+            border-color: var(--neon-yellow);
+            background: #333;
+            transform: translateY(-5px);
+        }
+
+        .tool-icon { font-size: 20px; margin-bottom: 5px; }
+        .tool-name { font-size: 9px; color: #aaa; text-align: center; }
+
+        #overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            display: none;
+            z-index: 20;
+            pointer-events: none;
+        }
+        
+        #overlay h1 {
+            font-size: 60px;
+            margin: 0;
+            text-shadow: 0 0 20px currentColor;
+        }
+
+        .controls-hint {
+            position: absolute;
+            top: 60px;
+            left: 20px;
+            color: #888;
+            font-size: 11px;
+            pointer-events: none;
+            background: rgba(0,0,0,0.6);
+            padding: 8px;
+            border-radius: 4px;
+            border-left: 3px solid var(--neon-blue);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="top-bar">
+        <div style="font-weight: bold; color: var(--neon-blue); font-size: 18px; letter-spacing: 1px;">NEON DASH</div>
+        <div id="mode-controls">
+            <button class="btn primary" id="btn-play" onclick="togglePlayMode()">▶ HRÁT</button>
+            <button class="btn danger" id="btn-stop" style="display:none;" onclick="togglePlayMode()">■ EDITOR</button>
+        </div>
+        <div style="display: flex; gap: 5px;">
+            <button class="btn" onclick="saveLevel()">Uložit</button>
+            <button class="btn" onclick="loadLevel()">Načíst</button>
+            <button class="btn" onclick="clearLevel()">Smazat</button>
+        </div>
+    </div>
+
+    <div class="controls-hint" id="controls-hint">
+        <b>L myš:</b> Položit | <b>P myš:</b> Smazat | <b>R:</b> Otočit | <b>Kolečko:</b> Posun
+    </div>
+
+    <div id="overlay">
+        <h1 id="overlay-text">LEVEL COMPLETE</h1>
+    </div>
+
+    <div id="editor-ui">
+        <!-- Prvky budou přidány dynamicky -->
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * KONFIGURACE
+ */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const GRID_SIZE = 40; 
+let FLOOR_Y = 0;
+
+const STATE = { EDITOR: 'editor', PLAY: 'play', DEAD: 'dead', WIN: 'win' };
+let currentState = STATE.EDITOR;
+let cameraX = 0; 
+let editorLastCameraX = 0;
+let levelObjects = []; 
+
+let player = {
+    x: 100, y: 0, w: 38, h: 38, dy: 0, angle: 0, 
+    isGrounded: false, isRocket: false, gravityDir: 1, // 1 = dolů, -1 = nahoru
+    color: '#ffee00', speedMult: 1
+};
+
+const TOOLS = [
+    { id: 'block', name: 'Blok', icon: '⬛', color: '#00f3ff' },
+    { id: 'slab', name: 'Půlblok', icon: '➖', color: '#00f3ff' },
+    { id: 'spike', name: 'Spike', icon: '▲', color: '#ff0055' },
+    { id: 'jump', name: 'Trampo', icon: '◯', color: '#bc13fe' },
+    { id: 'rocket_portal', name: 'Raketka', icon: '🚀', color: '#00ff66' },
+    { id: 'gravity_portal', name: 'Gravitace', icon: '🔄', color: '#ffee00' },
+    { id: 'start', name: 'Start', icon: '🚩', color: '#00f3ff' },
+    { id: 'finish', name: 'Cíl', icon: '🏁', color: '#00ff66' }
+];
+
+let selectedTool = 'block'; 
+let mouseX = 0, mouseY = 0, previewRotation = 0;
+let isMouseDown = false;
+
+/**
+ * UI INICIALIZACE
+ */
+const uiContainer = document.getElementById('editor-ui');
+TOOLS.forEach(tool => {
+    const div = document.createElement('div');
+    div.className = `tool-item ${tool.id === selectedTool ? 'active' : ''}`;
+    div.dataset.type = tool.id;
+    div.onclick = () => selectTool(tool.id);
+    div.innerHTML = `<div class="tool-icon" style="color:${tool.color}">${tool.icon}</div><div class="tool-name">${tool.name}</div>`;
+    uiContainer.appendChild(div);
+});
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    const totalRows = Math.floor(canvas.height / GRID_SIZE);
+    FLOOR_Y = (totalRows - 2) * GRID_SIZE;
+}
+window.addEventListener('resize', resize);
+resize();
+
+if(localStorage.getItem('gd_level_offline')) loadLevel();
+
+/**
+ * SMYČKA
+ */
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function update() {
+    if (currentState === STATE.PLAY) {
+        player.x += 6.5 * player.speedMult; 
+        cameraX = player.x - 200; 
+
+        const gravityStrength = 0.65 * player.gravityDir;
+
+        // Mechanika pohybu
+        if (player.isRocket) {
+            // Raketka: Držení mezerníku letí "proti" aktuální gravitaci
+            if (isMouseDown) {
+                player.dy -= 0.8 * player.gravityDir;
+            } else {
+                player.dy += 0.8 * player.gravityDir;
+            }
+            // Limit rychlosti raketky
+            if (Math.abs(player.dy) > 7) player.dy = 7 * Math.sign(player.dy);
+            
+            player.angle = player.dy * 0.05 * player.gravityDir;
+        } else {
+            // Normální kostka: Gravitace
+            player.dy += gravityStrength; 
+            if (!player.isGrounded) {
+                player.angle += 0.15 * player.gravityDir;
+            } else {
+                player.angle = Math.round(player.angle / (Math.PI/2)) * (Math.PI/2);
+            }
+        }
+
+        player.y += player.dy;
+        player.isGrounded = false;
+
+        // Podlaha
+        if (player.y + player.h >= FLOOR_Y) {
+            if (player.gravityDir === 1) {
+                player.y = FLOOR_Y - player.h;
+                player.dy = 0;
+                player.isGrounded = true;
+            } else {
+                die(); // V obrácené gravitaci je pád na dolní zem smrt
+            }
+        }
+        
+        // Strop (v obrácené gravitaci se chová jako podlaha)
+        if (player.y <= 0) {
+            if (player.gravityDir === -1) {
+                player.y = 0;
+                player.dy = 0;
+                player.isGrounded = true;
+            } else {
+                die(); // V normální gravitaci je náraz do stropu smrt
+            }
+        }
+
+        checkCollisions();
+    }
+}
+
+function checkCollisions() {
+    const px = player.x;
+    const py = player.y;
+    const pw = player.w;
+    const ph = player.h;
+
+    for (let obj of levelObjects) {
+        if (!obj.active && (obj.type === 'rocket_portal' || obj.type === 'gravity_portal' || obj.type === 'jump')) continue;
+
+        if (rectIntersect(px, py, pw, ph, obj.x, obj.y, obj.w, obj.h)) {
+            
+            if (obj.type === 'block' || obj.type === 'slab') {
+                const prevY = player.y - player.dy;
+                
+                // Kolize s pevnou plochou
+                if (player.gravityDir === 1) {
+                    // Normální gravitace: přistání na horní straně bloku
+                    if (player.dy >= 0 && (prevY + player.h) <= obj.y + 12) {
+                        player.y = obj.y - player.h;
+                        player.dy = 0;
+                        player.isGrounded = true;
+                    } else die();
+                } else {
+                    // Obrácená gravitace: přistání na spodní straně bloku (která je teď nahoře)
+                    if (player.dy <= 0 && prevY >= (obj.y + obj.h - 12)) {
+                        player.y = obj.y + obj.h;
+                        player.dy = 0;
+                        player.isGrounded = true;
+                    } else die();
+                }
+                if(currentState === STATE.DEAD) return;
+            }
+            else if (obj.type === 'spike') {
+                const m = 12; // Tolerance
+                if (rectIntersect(px+m, py+m, pw-m*2, ph-m*2, obj.x, obj.y, obj.w, obj.h)) {
+                    die(); return;
+                }
+            }
+            else if (obj.type === 'jump') {
+                player.dy = -15 * player.gravityDir;
+                player.isGrounded = false;
+            }
+            else if (obj.type === 'rocket_portal') {
+                player.isRocket = !player.isRocket;
+                obj.active = false;
+            }
+            else if (obj.type === 'gravity_portal') {
+                player.gravityDir *= -1;
+                obj.active = false;
+                // Malý "bounce" při průletu portálem, aby hráč hned nepadal zpět
+                player.dy = 2 * player.gravityDir;
+            }
+            else if (obj.type === 'finish') {
+                win(); return;
+            }
+        }
+    }
+}
+
+function rectIntersect(x1, y1, w1, h1, x2, y2, w2, h2) {
+    return x2 < x1 + w1 && x2 + w2 > x1 && y2 < y1 + h1 && y2 + h2 > y1;
+}
+
+function die() {
+    currentState = STATE.PLAY;
+    resetGame();
+}
+
+function win() {
+    currentState = STATE.WIN;
+    showOverlay("LEVEL DOKONČEN", "#00ff66");
+}
+
+/**
+ * VYKRESLOVÁNÍ
+ */
+function draw() {
+    ctx.fillStyle = '#050505';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (currentState === STATE.EDITOR) {
+        ctx.strokeStyle = '#1a1a1a';
+        ctx.lineWidth = 1;
+        const startX = -(cameraX % GRID_SIZE);
+        for(let x = startX; x < canvas.width; x += GRID_SIZE) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+        }
+        for(let y = 0; y < canvas.height; y += GRID_SIZE) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+        }
+    }
+
+    ctx.save();
+    ctx.translate(-cameraX, 0);
+
+    // Podlaha (spodní neonová čára)
+    ctx.strokeStyle = '#00f3ff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cameraX, FLOOR_Y);
+    ctx.lineTo(cameraX + canvas.width, FLOOR_Y);
+    ctx.stroke();
+
+    // Horní "podlaha" (v editoru pomáhá vidět hranici)
+    ctx.strokeStyle = '#ff0055';
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.moveTo(cameraX, 0);
+    ctx.lineTo(cameraX + canvas.width, 0);
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+
+    levelObjects.forEach(drawObject);
+
+    if (currentState === STATE.EDITOR) drawGhost();
+    else drawPlayer();
+
+    ctx.restore();
+}
+
+function drawObject(obj) {
+    ctx.save();
+    const cx = obj.x + obj.w / 2;
+    const cy = obj.y + obj.h / 2;
+    ctx.translate(cx, cy);
+    ctx.rotate((obj.rotation || 0) * Math.PI / 180);
+    ctx.translate(-cx, -cy);
+
+    if (obj.type === 'block' || obj.type === 'slab') {
+        ctx.fillStyle = '#000';
+        ctx.strokeStyle = '#00f3ff';
+        ctx.lineWidth = 2;
+        ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+        ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+    } 
+    else if (obj.type === 'spike') {
+        ctx.fillStyle = '#ff0055';
+        ctx.beginPath();
+        ctx.moveTo(obj.x, obj.y + obj.h);
+        ctx.lineTo(obj.x + obj.w/2, obj.y);
+        ctx.lineTo(obj.x + obj.w, obj.y + obj.h);
+        ctx.fill();
+    }
+    else if (obj.type === 'jump') {
+        ctx.strokeStyle = '#bc13fe';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 15, 0, Math.PI*2);
+        ctx.stroke();
+    }
+    else if (obj.type === 'rocket_portal') {
+        ctx.strokeStyle = '#00ff66';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, 15, 30, 0, 0, Math.PI*2);
+        ctx.stroke();
+    }
+    else if (obj.type === 'gravity_portal') {
+        ctx.strokeStyle = '#ffee00';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, 15, 30, 0, 0, Math.PI*2);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 238, 0, 0.4)';
+        ctx.fill();
+    }
+    else if (obj.type === 'start') {
+        ctx.strokeStyle = '#00f3ff';
+        ctx.setLineDash([5, 5]);
+        ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#00f3ff';
+        ctx.font = '20px Arial';
+        ctx.fillText('🚩', obj.x + 8, obj.y + 28);
+    }
+    else if (obj.type === 'finish') {
+        ctx.fillStyle = '#00ff66';
+        ctx.fillRect(obj.x + obj.w/2 - 2, obj.y, 4, obj.h);
+        ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+    }
+
+    ctx.restore();
+}
+
+function drawPlayer() {
+    ctx.save();
+    ctx.translate(player.x + player.w/2, player.y + player.h/2);
+    
+    // Vizuální otočení hráče při obrácené gravitaci
+    const scaleY = player.gravityDir === -1 ? -1 : 1;
+    ctx.scale(1, scaleY);
+    ctx.rotate(player.angle * scaleY);
+    
+    ctx.fillStyle = player.color;
+    ctx.shadowBlur = 15; ctx.shadowColor = player.color;
+    
+    if (player.isRocket) {
+        ctx.beginPath();
+        ctx.moveTo(-player.w/2, -player.h/4);
+        ctx.lineTo(player.w/2, 0);
+        ctx.lineTo(-player.w/2, player.h/4);
+        ctx.closePath();
+        ctx.fill();
+        if (isMouseDown) {
+            ctx.fillStyle = '#ff0055';
+            ctx.fillRect(-player.w/2 - 10, -5, 10, 10);
+        }
+    } else {
+        ctx.fillRect(-player.w/2, -player.h/2, player.w, player.h);
+        ctx.fillStyle = 'black';
+        ctx.fillRect(5, -10, 5, 5);
+        ctx.fillRect(5, 5, 5, 5);
+    }
+    ctx.restore();
+}
+
+function drawGhost() {
+    const snap = getSnappedMouse();
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    const ghost = { type: selectedTool, x: snap.x, y: snap.y, w: GRID_SIZE, h: GRID_SIZE, rotation: previewRotation };
+    
+    if(selectedTool === 'slab') ghost.h = 20;
+    if(selectedTool === 'finish') { ghost.w = 20; ghost.h = 400; ghost.y = FLOOR_Y - 400; }
+    
+    drawObject(ghost);
+    ctx.restore();
+}
+
+/**
+ * LOGIKA EDITORU
+ */
+function getSnappedMouse() {
+    const worldX = mouseX + cameraX;
+    return { 
+        x: Math.floor(worldX / GRID_SIZE) * GRID_SIZE, 
+        y: Math.floor(mouseY / GRID_SIZE) * GRID_SIZE 
+    };
+}
+
+canvas.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+
+canvas.addEventListener('mousedown', e => {
+    isMouseDown = true;
+    if (currentState !== STATE.EDITOR) { jump(); return; }
+    if (e.button !== 0) return;
+
+    const snap = getSnappedMouse();
+    let newObj = { id: Date.now(), type: selectedTool, x: snap.x, y: snap.y, w: GRID_SIZE, h: GRID_SIZE, rotation: previewRotation, active: true };
+
+    if(selectedTool === 'slab') newObj.h = 20;
+    if(selectedTool === 'finish') { 
+        newObj.w = 20; newObj.h = 400; newObj.y = FLOOR_Y - 400; 
+        levelObjects = levelObjects.filter(o => o.type !== 'finish');
+    }
+    if(selectedTool === 'start') {
+        levelObjects = levelObjects.filter(o => o.type !== 'start');
+    }
+
+    levelObjects = levelObjects.filter(o => !(Math.abs(o.x - newObj.x) < 5 && Math.abs(o.y - newObj.y) < 5));
+    levelObjects.push(newObj);
+});
+
+window.addEventListener('mouseup', () => { isMouseDown = false; });
+
+canvas.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    if (currentState !== STATE.EDITOR) return;
+    const worldX = mouseX + cameraX;
+    levelObjects = levelObjects.filter(o => !(worldX >= o.x && worldX <= o.x+o.w && mouseY >= o.y && mouseY <= o.y+o.h));
+});
+
+canvas.addEventListener('wheel', e => {
+    if (currentState === STATE.EDITOR) { cameraX += e.deltaY; if (cameraX < 0) cameraX = 0; }
+});
+
+window.addEventListener('keydown', e => {
+    if ((e.code === 'Space' || e.code === 'ArrowUp')) {
+        isMouseDown = true;
+        if (currentState === STATE.PLAY) jump();
+    }
+    if (currentState === STATE.EDITOR && e.key.toLowerCase() === 'r') previewRotation = (previewRotation + 90) % 360;
+});
+
+window.addEventListener('keyup', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') isMouseDown = false;
+});
+
+function jump() { 
+    if (!player.isRocket && player.isGrounded) { 
+        player.dy = -11 * player.gravityDir; 
+        player.isGrounded = false; 
+    } 
+}
+
+function selectTool(type) {
+    selectedTool = type;
+    document.querySelectorAll('.tool-item').forEach(el => el.classList.toggle('active', el.dataset.type === type));
+}
+
+function togglePlayMode() {
+    if (currentState === STATE.EDITOR) {
+        editorLastCameraX = cameraX;
+        currentState = STATE.PLAY;
+        resetGame();
+        document.getElementById('btn-play').style.display = 'none';
+        document.getElementById('btn-stop').style.display = 'inline-block';
+        document.getElementById('editor-ui').classList.add('hidden');
+    } else {
+        currentState = STATE.EDITOR;
+        cameraX = editorLastCameraX;
+        hideOverlay();
+        document.getElementById('btn-play').style.display = 'inline-block';
+        document.getElementById('btn-stop').style.display = 'none';
+        document.getElementById('editor-ui').classList.remove('hidden');
+    }
+}
+
+function resetGame() {
+    levelObjects.forEach(o => o.active = true);
+    
+    const startPoint = levelObjects.find(o => o.type === 'start');
+    if (startPoint) {
+        player.x = startPoint.x;
+        player.y = startPoint.y;
+    } else {
+        player.x = 100; 
+        player.y = FLOOR_Y - 40;
+    }
+    
+    player.dy = 0; 
+    player.angle = 0;
+    player.speedMult = 1;
+    player.isRocket = false;
+    player.gravityDir = 1; // Reset gravitace na začátku
+    cameraX = player.x - 200;
+    hideOverlay();
+}
+
+function saveLevel() {
+    localStorage.setItem('gd_level_offline', JSON.stringify(levelObjects));
+}
+
+function loadLevel() {
+    const data = localStorage.getItem('gd_level_offline');
+    if (data) levelObjects = JSON.parse(data);
+}
+
+function clearLevel() {
+    if(confirm("Smazat vše?")) levelObjects = [];
+}
+
+function showOverlay(text, color) {
+    const ov = document.getElementById('overlay');
+    const txt = document.getElementById('overlay-text');
+    txt.innerText = text; txt.style.color = color;
+    ov.style.display = 'block';
+}
+
+function hideOverlay() { document.getElementById('overlay').style.display = 'none'; }
+
+</script>
+</body>
+</html>
