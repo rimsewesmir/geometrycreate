@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Neon Dash Creator - Fixed Gravity</title>
+    <title>Neon Dash Creator </title>
     <style>
         :root {
             --bg-color: #050505;
@@ -158,13 +158,12 @@
         <div style="display: flex; gap: 5px;">
             <button class="btn" onclick="saveLevel()">Uložit</button>
             <button class="btn" onclick="loadLevel()">Načíst</button>
-           
             <button class="btn" onclick="clearLevel()">Smazat</button>
         </div>
     </div>
 
     <div class="controls-hint" id="controls-hint">
-        <b>L myš:</b> Položit | <b>P myš:</b> Smazat | <b>R:</b> Otočit | <b>Kolečko:</b> Posun
+        <b>L myš:</b> Položit | <b>Shift:</b> Vyplnit | <b>R:</b> Otočit | <b>+/-:</b> Velikost (×<span id="scale-val">1.0</span>)
     </div>
 
     <div id="overlay">
@@ -194,9 +193,17 @@ let levelObjects = [];
 
 let player = {
     x: 100, y: 0, w: 38, h: 38, dy: 0, angle: 0, 
-    isGrounded: false, isRocket: false, gravityDir: 1, // 1 = dolů, -1 = nahoru
+    isGrounded: false, isRocket: false, gravityDir: 1, 
     color: '#ffee00', speedMult: 1
 };
+
+// Input buffering a editor state
+let jumpBuffered = false;
+let lastJumpPressTime = 0;
+const JUMP_BUFFER_MS = 100;
+let isShiftDown = false;
+let lastPlacedPos = null;
+let currentScale = 1.0; // Aktuální měřítko pro editor
 
 const TOOLS = [
     { id: 'block', name: 'Blok', icon: '⬛', color: '#00f3ff' },
@@ -254,51 +261,31 @@ function update() {
 
         const gravityStrength = 0.65 * player.gravityDir;
 
-        // Mechanika pohybu
         if (player.isRocket) {
-            // Raketka: Držení mezerníku letí "proti" aktuální gravitaci
-            if (isMouseDown) {
-                player.dy -= 0.8 * player.gravityDir;
-            } else {
-                player.dy += 0.8 * player.gravityDir;
-            }
-            // Limit rychlosti raketky
+            if (isMouseDown) player.dy -= 0.8 * player.gravityDir;
+            else player.dy += 0.8 * player.gravityDir;
             if (Math.abs(player.dy) > 7) player.dy = 7 * Math.sign(player.dy);
-            
             player.angle = player.dy * 0.05 * player.gravityDir;
         } else {
-            // Normální kostka: Gravitace
+            if (jumpBuffered && Date.now() - lastJumpPressTime > JUMP_BUFFER_MS) jumpBuffered = false;
             player.dy += gravityStrength; 
-            if (!player.isGrounded) {
-                player.angle += 0.15 * player.gravityDir;
-            } else {
+            if (!player.isGrounded) player.angle += 0.15 * player.gravityDir;
+            else {
                 player.angle = Math.round(player.angle / (Math.PI/2)) * (Math.PI/2);
+                if (jumpBuffered || isMouseDown) performJump();
             }
         }
 
         player.y += player.dy;
         player.isGrounded = false;
 
-        // Podlaha
         if (player.y + player.h >= FLOOR_Y) {
-            if (player.gravityDir === 1) {
-                player.y = FLOOR_Y - player.h;
-                player.dy = 0;
-                player.isGrounded = true;
-            } else {
-                die(); // V obrácené gravitaci je pád na dolní zem smrt
-            }
+            if (player.gravityDir === 1) { player.y = FLOOR_Y - player.h; player.dy = 0; player.isGrounded = true; }
+            else die();
         }
-        
-        // Strop (v obrácené gravitaci se chová jako podlaha)
         if (player.y <= 0) {
-            if (player.gravityDir === -1) {
-                player.y = 0;
-                player.dy = 0;
-                player.isGrounded = true;
-            } else {
-                die(); // V normální gravitaci je náraz do stropu smrt
-            }
+            if (player.gravityDir === -1) { player.y = 0; player.dy = 0; player.isGrounded = true; }
+            else die();
         }
 
         checkCollisions();
@@ -306,60 +293,36 @@ function update() {
 }
 
 function checkCollisions() {
-    const px = player.x;
-    const py = player.y;
-    const pw = player.w;
-    const ph = player.h;
-
+    const px = player.x, py = player.y, pw = player.w, ph = player.h;
     for (let obj of levelObjects) {
         if (!obj.active && (obj.type === 'rocket_portal' || obj.type === 'gravity_portal' || obj.type === 'jump')) continue;
+        
+        // Výpočet kolizní plochy s ohledem na měřítko (scale)
+        const ow = obj.w * (obj.scale || 1);
+        const oh = obj.h * (obj.scale || 1);
+        const ox = obj.x + (obj.w - ow) / 2;
+        const oy = obj.y + (obj.h - oh) / 2;
 
-        if (rectIntersect(px, py, pw, ph, obj.x, obj.y, obj.w, obj.h)) {
-            
+        if (rectIntersect(px, py, pw, ph, ox, oy, ow, oh)) {
             if (obj.type === 'block' || obj.type === 'slab') {
                 const prevY = player.y - player.dy;
-                
-                // Kolize s pevnou plochou
                 if (player.gravityDir === 1) {
-                    // Normální gravitace: přistání na horní straně bloku
-                    if (player.dy >= 0 && (prevY + player.h) <= obj.y + 12) {
-                        player.y = obj.y - player.h;
-                        player.dy = 0;
-                        player.isGrounded = true;
-                    } else die();
+                    if (player.dy >= 0 && (prevY + player.h) <= oy + 12) { player.y = oy - player.h; player.dy = 0; player.isGrounded = true; }
+                    else die();
                 } else {
-                    // Obrácená gravitace: přistání na spodní straně bloku (která je teď nahoře)
-                    if (player.dy <= 0 && prevY >= (obj.y + obj.h - 12)) {
-                        player.y = obj.y + obj.h;
-                        player.dy = 0;
-                        player.isGrounded = true;
-                    } else die();
+                    if (player.dy <= 0 && prevY >= (oy + oh - 12)) { player.y = oy + oh; player.dy = 0; player.isGrounded = true; }
+                    else die();
                 }
                 if(currentState === STATE.DEAD) return;
             }
             else if (obj.type === 'spike') {
-                const m = 12; // Tolerance
-                if (rectIntersect(px+m, py+m, pw-m*2, ph-m*2, obj.x, obj.y, obj.w, obj.h)) {
-                    die(); return;
-                }
+                const m = 12 * (obj.scale || 1);
+                if (rectIntersect(px+m, py+m, pw-m*2, ph-m*2, ox, oy, ow, oh)) { die(); return; }
             }
-            else if (obj.type === 'jump') {
-                player.dy = -15 * player.gravityDir;
-                player.isGrounded = false;
-            }
-            else if (obj.type === 'rocket_portal') {
-                player.isRocket = !player.isRocket;
-                obj.active = false;
-            }
-            else if (obj.type === 'gravity_portal') {
-                player.gravityDir *= -1;
-                obj.active = false;
-                // Malý "bounce" při průletu portálem, aby hráč hned nepadal zpět
-                player.dy = 2 * player.gravityDir;
-            }
-            else if (obj.type === 'finish') {
-                win(); return;
-            }
+            else if (obj.type === 'jump') { player.dy = -15 * player.gravityDir; player.isGrounded = false; jumpBuffered = false; }
+            else if (obj.type === 'rocket_portal') { player.isRocket = !player.isRocket; obj.active = false; }
+            else if (obj.type === 'gravity_portal') { player.gravityDir *= -1; obj.active = false; player.dy = 2 * player.gravityDir; }
+            else if (obj.type === 'finish') { win(); return; }
         }
     }
 }
@@ -368,15 +331,8 @@ function rectIntersect(x1, y1, w1, h1, x2, y2, w2, h2) {
     return x2 < x1 + w1 && x2 + w2 > x1 && y2 < y1 + h1 && y2 + h2 > y1;
 }
 
-function die() {
-    currentState = STATE.PLAY;
-    resetGame();
-}
-
-function win() {
-    currentState = STATE.WIN;
-    showOverlay("LEVEL DOKONČEN", "#00ff66");
-}
+function die() { resetGame(); }
+function win() { currentState = STATE.WIN; showOverlay("LEVEL DOKONČEN", "#00ff66"); }
 
 /**
  * VYKRESLOVÁNÍ
@@ -386,8 +342,7 @@ function draw() {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     if (currentState === STATE.EDITOR) {
-        ctx.strokeStyle = '#1a1a1a';
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 1;
         const startX = -(cameraX % GRID_SIZE);
         for(let x = startX; x < canvas.width; x += GRID_SIZE) {
             ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
@@ -399,224 +354,191 @@ function draw() {
 
     ctx.save();
     ctx.translate(-cameraX, 0);
-
-    // Podlaha (spodní neonová čára)
-    ctx.strokeStyle = '#00f3ff';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(cameraX, FLOOR_Y);
-    ctx.lineTo(cameraX + canvas.width, FLOOR_Y);
-    ctx.stroke();
-
-    // Horní "podlaha" (v editoru pomáhá vidět hranici)
-    ctx.strokeStyle = '#ff0055';
-    ctx.globalAlpha = 0.3;
-    ctx.beginPath();
-    ctx.moveTo(cameraX, 0);
-    ctx.lineTo(cameraX + canvas.width, 0);
-    ctx.stroke();
+    ctx.strokeStyle = '#00f3ff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cameraX, FLOOR_Y); ctx.lineTo(cameraX + canvas.width, FLOOR_Y); ctx.stroke();
+    ctx.strokeStyle = '#ff0055'; ctx.globalAlpha = 0.3;
+    ctx.beginPath(); ctx.moveTo(cameraX, 0); ctx.lineTo(cameraX + canvas.width, 0); ctx.stroke();
     ctx.globalAlpha = 1.0;
 
     levelObjects.forEach(drawObject);
-
     if (currentState === STATE.EDITOR) drawGhost();
     else drawPlayer();
-
     ctx.restore();
 }
 
 function drawObject(obj) {
+    const s = obj.scale || 1;
     ctx.save();
-    const cx = obj.x + obj.w / 2;
-    const cy = obj.y + obj.h / 2;
-    ctx.translate(cx, cy);
-    ctx.rotate((obj.rotation || 0) * Math.PI / 180);
+    
+    // Střed objektu pro rotaci i měřítko
+    const cx = obj.x + obj.w / 2, cy = obj.y + obj.h / 2;
+    ctx.translate(cx, cy); 
+    ctx.rotate((obj.rotation || 0) * Math.PI / 180); 
+    ctx.scale(s, s);
     ctx.translate(-cx, -cy);
 
     if (obj.type === 'block' || obj.type === 'slab') {
-        ctx.fillStyle = '#000';
-        ctx.strokeStyle = '#00f3ff';
-        ctx.lineWidth = 2;
-        ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
-        ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
-    } 
-    else if (obj.type === 'spike') {
-        ctx.fillStyle = '#ff0055';
-        ctx.beginPath();
-        ctx.moveTo(obj.x, obj.y + obj.h);
-        ctx.lineTo(obj.x + obj.w/2, obj.y);
-        ctx.lineTo(obj.x + obj.w, obj.y + obj.h);
-        ctx.fill();
+        ctx.fillStyle = '#000'; ctx.strokeStyle = '#00f3ff'; ctx.lineWidth = 2/s;
+        ctx.fillRect(obj.x, obj.y, obj.w, obj.h); ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+    } else if (obj.type === 'spike') {
+        ctx.fillStyle = '#ff0055'; ctx.beginPath();
+        ctx.moveTo(obj.x, obj.y + obj.h); ctx.lineTo(obj.x + obj.w/2, obj.y); ctx.lineTo(obj.x + obj.w, obj.y + obj.h); ctx.fill();
+    } else if (obj.type === 'jump') {
+        ctx.strokeStyle = '#bc13fe'; ctx.lineWidth = 3/s; ctx.beginPath(); ctx.arc(cx, cy, 15, 0, Math.PI*2); ctx.stroke();
+    } else if (obj.type === 'rocket_portal') {
+        ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 4/s; ctx.beginPath(); ctx.ellipse(cx, cy, 15, 30, 0, 0, Math.PI*2); ctx.stroke();
+    } else if (obj.type === 'gravity_portal') {
+        ctx.strokeStyle = '#ffee00'; ctx.lineWidth = 4/s; ctx.beginPath(); ctx.ellipse(cx, cy, 15, 30, 0, 0, Math.PI*2); ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 238, 0, 0.4)'; ctx.fill();
+    } else if (obj.type === 'start') {
+        ctx.strokeStyle = '#00f3ff'; ctx.setLineDash([5, 5]); ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+        ctx.setLineDash([]); ctx.fillStyle = '#00f3ff'; ctx.font = '20px Arial'; ctx.fillText('🚩', obj.x + 8, obj.y + 28);
+    } else if (obj.type === 'finish') {
+        ctx.fillStyle = '#00ff66'; ctx.fillRect(obj.x + obj.w/2 - 2, obj.y, 4, obj.h); ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
     }
-    else if (obj.type === 'jump') {
-        ctx.strokeStyle = '#bc13fe';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.arc(cx, cy, 15, 0, Math.PI*2);
-        ctx.stroke();
-    }
-    else if (obj.type === 'rocket_portal') {
-        ctx.strokeStyle = '#00ff66';
-        ctx.lineWidth = 4;
-        ctx.beginPath();
-        ctx.ellipse(cx, cy, 15, 30, 0, 0, Math.PI*2);
-        ctx.stroke();
-    }
-    else if (obj.type === 'gravity_portal') {
-        ctx.strokeStyle = '#ffee00';
-        ctx.lineWidth = 4;
-        ctx.beginPath();
-        ctx.ellipse(cx, cy, 15, 30, 0, 0, Math.PI*2);
-        ctx.stroke();
-        ctx.fillStyle = 'rgba(255, 238, 0, 0.4)';
-        ctx.fill();
-    }
-    else if (obj.type === 'start') {
-        ctx.strokeStyle = '#00f3ff';
-        ctx.setLineDash([5, 5]);
-        ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#00f3ff';
-        ctx.font = '20px Arial';
-        ctx.fillText('🚩', obj.x + 8, obj.y + 28);
-    }
-    else if (obj.type === 'finish') {
-        ctx.fillStyle = '#00ff66';
-        ctx.fillRect(obj.x + obj.w/2 - 2, obj.y, 4, obj.h);
-        ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
-    }
-
     ctx.restore();
 }
 
 function drawPlayer() {
     ctx.save();
     ctx.translate(player.x + player.w/2, player.y + player.h/2);
-    
-    // Vizuální otočení hráče při obrácené gravitaci
     const scaleY = player.gravityDir === -1 ? -1 : 1;
-    ctx.scale(1, scaleY);
-    ctx.rotate(player.angle * scaleY);
-    
-    ctx.fillStyle = player.color;
-    ctx.shadowBlur = 15; ctx.shadowColor = player.color;
-    
+    ctx.scale(1, scaleY); ctx.rotate(player.angle * scaleY);
+    ctx.fillStyle = player.color; ctx.shadowBlur = 15; ctx.shadowColor = player.color;
     if (player.isRocket) {
-        ctx.beginPath();
-        ctx.moveTo(-player.w/2, -player.h/4);
-        ctx.lineTo(player.w/2, 0);
-        ctx.lineTo(-player.w/2, player.h/4);
-        ctx.closePath();
-        ctx.fill();
-        if (isMouseDown) {
-            ctx.fillStyle = '#ff0055';
-            ctx.fillRect(-player.w/2 - 10, -5, 10, 10);
-        }
+        ctx.beginPath(); ctx.moveTo(-player.w/2, -player.h/4); ctx.lineTo(player.w/2, 0); ctx.lineTo(-player.w/2, player.h/4); ctx.closePath(); ctx.fill();
+        if (isMouseDown) { ctx.fillStyle = '#ff0055'; ctx.fillRect(-player.w/2 - 10, -5, 10, 10); }
     } else {
         ctx.fillRect(-player.w/2, -player.h/2, player.w, player.h);
-        ctx.fillStyle = 'black';
-        ctx.fillRect(5, -10, 5, 5);
-        ctx.fillRect(5, 5, 5, 5);
+        ctx.fillStyle = 'black'; ctx.fillRect(5, -10, 5, 5); ctx.fillRect(5, 5, 5, 5);
     }
     ctx.restore();
 }
 
 function drawGhost() {
     const snap = getSnappedMouse();
-    ctx.save();
-    ctx.globalAlpha = 0.4;
-    const ghost = { type: selectedTool, x: snap.x, y: snap.y, w: GRID_SIZE, h: GRID_SIZE, rotation: previewRotation };
-    
+    ctx.save(); ctx.globalAlpha = 0.4;
+    const ghost = { type: selectedTool, x: snap.x, y: snap.y, w: GRID_SIZE, h: GRID_SIZE, rotation: previewRotation, scale: currentScale };
     if(selectedTool === 'slab') ghost.h = 20;
     if(selectedTool === 'finish') { ghost.w = 20; ghost.h = 400; ghost.y = FLOOR_Y - 400; }
+    drawObject(ghost); ctx.restore();
     
-    drawObject(ghost);
-    ctx.restore();
+    if (isShiftDown && lastPlacedPos) {
+        ctx.strokeStyle = 'white'; ctx.lineWidth = 2; ctx.setLineDash([5,5]);
+        ctx.strokeRect(lastPlacedPos.x - cameraX, lastPlacedPos.y, GRID_SIZE, GRID_SIZE);
+        ctx.setLineDash([]);
+    }
 }
 
 /**
- * LOGIKA EDITORU
+ * LOGIKA OVLÁDÁNÍ
  */
-function getSnappedMouse() {
-    const worldX = mouseX + cameraX;
-    return { 
-        x: Math.floor(worldX / GRID_SIZE) * GRID_SIZE, 
-        y: Math.floor(mouseY / GRID_SIZE) * GRID_SIZE 
-    };
+function handleStartInput(e) {
+    if (e.code === 'Space') e.preventDefault();
+    isMouseDown = true;
+    if (currentState === STATE.PLAY) {
+        if (!player.isRocket) {
+            if (player.isGrounded) performJump();
+            else { jumpBuffered = true; lastJumpPressTime = Date.now(); }
+        }
+    }
 }
 
-canvas.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+function performJump() { player.dy = -11 * player.gravityDir; player.isGrounded = false; jumpBuffered = false; }
+
+function placeObjectAt(x, y) {
+    let newObj = { 
+        id: Date.now() + Math.random(), 
+        type: selectedTool, 
+        x, y, 
+        w: GRID_SIZE, h: GRID_SIZE, 
+        rotation: previewRotation, 
+        scale: currentScale,
+        active: true 
+    };
+    if(selectedTool === 'slab') newObj.h = 20;
+    if(selectedTool === 'finish') { newObj.w = 20; newObj.h = 400; newObj.y = FLOOR_Y - 400; levelObjects = levelObjects.filter(o => o.type !== 'finish'); }
+    if(selectedTool === 'start') levelObjects = levelObjects.filter(o => o.type !== 'start');
+    levelObjects = levelObjects.filter(o => !(Math.abs(o.x - x) < 5 && Math.abs(o.y - y) < 5));
+    levelObjects.push(newObj);
+    lastPlacedPos = { x, y };
+}
 
 canvas.addEventListener('mousedown', e => {
-    isMouseDown = true;
-    if (currentState !== STATE.EDITOR) { jump(); return; }
-    if (e.button !== 0) return;
-
-    const snap = getSnappedMouse();
-    let newObj = { id: Date.now(), type: selectedTool, x: snap.x, y: snap.y, w: GRID_SIZE, h: GRID_SIZE, rotation: previewRotation, active: true };
-
-    if(selectedTool === 'slab') newObj.h = 20;
-    if(selectedTool === 'finish') { 
-        newObj.w = 20; newObj.h = 400; newObj.y = FLOOR_Y - 400; 
-        levelObjects = levelObjects.filter(o => o.type !== 'finish');
+    if (currentState === STATE.EDITOR) {
+        if (e.button !== 0) return;
+        const snap = getSnappedMouse();
+        
+        if (isShiftDown && lastPlacedPos) {
+            if (snap.y === lastPlacedPos.y) {
+                const x1 = Math.min(snap.x, lastPlacedPos.x);
+                const x2 = Math.max(snap.x, lastPlacedPos.x);
+                for (let tx = x1; tx <= x2; tx += GRID_SIZE) placeObjectAt(tx, snap.y);
+            } else if (snap.x === lastPlacedPos.x) {
+                const y1 = Math.min(snap.y, lastPlacedPos.y);
+                const y2 = Math.max(snap.y, lastPlacedPos.y);
+                for (let ty = y1; ty <= y2; ty += GRID_SIZE) placeObjectAt(snap.x, ty);
+            } else {
+                placeObjectAt(snap.x, snap.y);
+            }
+        } else {
+            placeObjectAt(snap.x, snap.y);
+        }
     }
-    if(selectedTool === 'start') {
-        levelObjects = levelObjects.filter(o => o.type !== 'start');
-    }
-
-    levelObjects = levelObjects.filter(o => !(Math.abs(o.x - newObj.x) < 5 && Math.abs(o.y - newObj.y) < 5));
-    levelObjects.push(newObj);
+    handleStartInput(e);
 });
 
-window.addEventListener('mouseup', () => { isMouseDown = false; });
+window.addEventListener('mouseup', () => isMouseDown = false);
+window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') handleStartInput(e);
+    if (e.key === 'Shift') isShiftDown = true;
+    
+    if (currentState === STATE.EDITOR) {
+        if (e.key.toLowerCase() === 'r') previewRotation = (previewRotation + 90) % 360;
+        if (e.key === '+' || e.key === '=') {
+            currentScale = Math.min(3.0, currentScale + 0.1);
+            document.getElementById('scale-val').innerText = currentScale.toFixed(1);
+        }
+        if (e.key === '-' || e.key === '_') {
+            currentScale = Math.max(0.5, currentScale - 0.1);
+            document.getElementById('scale-val').innerText = currentScale.toFixed(1);
+        }
+    }
+});
+window.addEventListener('keyup', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') isMouseDown = false;
+    if (e.key === 'Shift') isShiftDown = false;
+});
 
+function getSnappedMouse() {
+    const worldX = mouseX + cameraX;
+    return { x: Math.floor(worldX / GRID_SIZE) * GRID_SIZE, y: Math.floor(mouseY / GRID_SIZE) * GRID_SIZE };
+}
+canvas.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
 canvas.addEventListener('contextmenu', e => {
     e.preventDefault();
     if (currentState !== STATE.EDITOR) return;
     const worldX = mouseX + cameraX;
     levelObjects = levelObjects.filter(o => !(worldX >= o.x && worldX <= o.x+o.w && mouseY >= o.y && mouseY <= o.y+o.h));
+    lastPlacedPos = null;
 });
-
 canvas.addEventListener('wheel', e => {
     if (currentState === STATE.EDITOR) { cameraX += e.deltaY; if (cameraX < 0) cameraX = 0; }
 });
 
-window.addEventListener('keydown', e => {
-    if ((e.code === 'Space' || e.code === 'ArrowUp')) {
-        isMouseDown = true;
-        if (currentState === STATE.PLAY) jump();
-    }
-    if (currentState === STATE.EDITOR && e.key.toLowerCase() === 'r') previewRotation = (previewRotation + 90) % 360;
-});
-
-window.addEventListener('keyup', e => {
-    if (e.code === 'Space' || e.code === 'ArrowUp') isMouseDown = false;
-});
-
-function jump() { 
-    if (!player.isRocket && player.isGrounded) { 
-        player.dy = -11 * player.gravityDir; 
-        player.isGrounded = false; 
-    } 
-}
-
 function selectTool(type) {
-    selectedTool = type;
+    selectedTool = type; lastPlacedPos = null;
     document.querySelectorAll('.tool-item').forEach(el => el.classList.toggle('active', el.dataset.type === type));
 }
 
 function togglePlayMode() {
     if (currentState === STATE.EDITOR) {
-        editorLastCameraX = cameraX;
-        currentState = STATE.PLAY;
-        resetGame();
+        editorLastCameraX = cameraX; currentState = STATE.PLAY; resetGame();
         document.getElementById('btn-play').style.display = 'none';
         document.getElementById('btn-stop').style.display = 'inline-block';
         document.getElementById('editor-ui').classList.add('hidden');
     } else {
-        currentState = STATE.EDITOR;
-        cameraX = editorLastCameraX;
-        hideOverlay();
+        currentState = STATE.EDITOR; cameraX = editorLastCameraX; hideOverlay();
         document.getElementById('btn-play').style.display = 'inline-block';
         document.getElementById('btn-stop').style.display = 'none';
         document.getElementById('editor-ui').classList.remove('hidden');
@@ -625,50 +547,22 @@ function togglePlayMode() {
 
 function resetGame() {
     levelObjects.forEach(o => o.active = true);
-    
     const startPoint = levelObjects.find(o => o.type === 'start');
-    if (startPoint) {
-        player.x = startPoint.x;
-        player.y = startPoint.y;
-    } else {
-        player.x = 100; 
-        player.y = FLOOR_Y - 40;
-    }
-    
-    player.dy = 0; 
-    player.angle = 0;
-    player.speedMult = 1;
-    player.isRocket = false;
-    player.gravityDir = 1; // Reset gravitace na začátku
-    cameraX = player.x - 200;
-    hideOverlay();
+    if (startPoint) { player.x = startPoint.x; player.y = startPoint.y; }
+    else { player.x = 100; player.y = FLOOR_Y - 40; }
+    player.dy = 0; player.angle = 0; player.isRocket = false; player.gravityDir = 1;
+    cameraX = player.x - 200; jumpBuffered = false; hideOverlay();
 }
 
-function saveLevel() {
-    localStorage.setItem('gd_level_offline', JSON.stringify(levelObjects));
-}
-
-function loadLevel() {
-    const data = localStorage.getItem('gd_level_offline');
-    if (data) levelObjects = JSON.parse(data);
-}
-
-function clearLevel() {
-    if(confirm("Smazat vše?")) levelObjects = [];
-}
-
+function saveLevel() { localStorage.setItem('gd_level_offline', JSON.stringify(levelObjects)); }
+function loadLevel() { const data = localStorage.getItem('gd_level_offline'); if (data) levelObjects = JSON.parse(data); }
+function clearLevel() { if(confirm("Smazat vše?")) { levelObjects = []; lastPlacedPos = null; } }
 function showOverlay(text, color) {
     const ov = document.getElementById('overlay');
     const txt = document.getElementById('overlay-text');
-    txt.innerText = text; txt.style.color = color;
-    ov.style.display = 'block';
+    txt.innerText = text; txt.style.color = color; ov.style.display = 'block';
 }
-
 function hideOverlay() { document.getElementById('overlay').style.display = 'none'; }
-
 </script>
 </body>
 </html>
-
-
-
